@@ -34,7 +34,7 @@ async function obtenerIndicadores(req, res) {
     const hallazgosAbiertos = hallazgosRows.rows.filter((h) => ["Abierto", "Asignado", "Escalado", "Pendiente de Retest", "Reabierto"].includes(h.estado));
     const hallazgosEscalados = hallazgosRows.rows.filter((h) => h.estado === "Escalado");
 
-    const hallazgosPorSeveridad = ["Alta", "Media", "Baja"].map((severidad) => ({
+    const hallazgosPorSeveridad = ["Crítica", "Alta", "Media", "Baja"].map((severidad) => ({
       severidad,
       cantidad: hallazgosAbiertos.filter((h) => h.severidad === severidad).length,
     }));

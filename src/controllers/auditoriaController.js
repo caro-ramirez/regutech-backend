@@ -141,6 +141,7 @@ async function enviarChecklist(req, res) {
     }
     const config = await obtenerConfigInterna(auditoriaRow.rows[0].id_entidad);
     const diasPorCriticidad = {
+      "Crítica": config.sla_critica_dias,
       Alta: config.sla_alta_dias,
       Media: config.sla_media_dias,
       Baja: config.sla_baja_dias,

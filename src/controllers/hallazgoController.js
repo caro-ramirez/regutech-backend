@@ -256,7 +256,7 @@ async function retest(req, res) {
       await pool.query(`UPDATE hallazgo SET estado = $2, resultado_retest = $3 WHERE id_hallazgo = $1`, [id, estadoFinal, resultado]);
     } else {
       const config = await obtenerConfigInterna(id_entidad);
-      const diasPorCriticidad = { Alta: config.sla_alta_dias, Media: config.sla_media_dias, Baja: config.sla_baja_dias };
+      const diasPorCriticidad = { "Crítica": config.sla_critica_dias, Alta: config.sla_alta_dias, Media: config.sla_media_dias, Baja: config.sla_baja_dias };
       const dias = diasPorCriticidad[severidad] || 30;
       await pool.query(
         `UPDATE hallazgo

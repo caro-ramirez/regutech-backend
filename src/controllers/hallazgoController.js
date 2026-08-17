@@ -1,6 +1,7 @@
 const pool = require("../config/db");
 
 const { obtenerConfigInterna } = require("./configuracionController");
+const { obtenerAuditoriaDeHallazgo } = require("../utils/autorizacion");
 
 async function escalarVencidosPorEntidad(idEntidad) {
   const vencidos = await pool.query(
@@ -31,13 +32,36 @@ async function escalarVencidosPorEntidad(idEntidad) {
   }
 }
 
+// Verifica que quien pide la lista/acciones sobre una auditoría tenga permiso real, no solo el rol.
+function verificarAccesoAAuditoria(auditoriaInfo, usuario) {
+  if (!auditoriaInfo) return { ok: false, status: 404, error: "Auditoría no encontrada." };
+  if (usuario.rol === "Administrador") {
+    if (auditoriaInfo.id_entidad !== usuario.idEntidad) {
+      return { ok: false, status: 403, error: "Esta auditoría no pertenece a tu entidad." };
+    }
+  } else if (usuario.rol === "ResponsableCumplimiento") {
+    if (auditoriaInfo.id_responsable !== usuario.id) {
+      return { ok: false, status: 403, error: "Esta auditoría no está asignada a vos." };
+    }
+  }
+  return { ok: true };
+}
+
 async function listarPorAuditoria(req, res) {
   const { auditoriaId } = req.query;
   try {
-    const auditoria = await pool.query(`SELECT id_entidad FROM auditoria WHERE id_auditoria = $1`, [auditoriaId]);
-    if (auditoria.rows.length > 0) {
-      await escalarVencidosPorEntidad(auditoria.rows[0].id_entidad);
+    const auditoria = await pool.query(
+      `SELECT id_entidad, id_responsable FROM auditoria WHERE id_auditoria = $1`,
+      [auditoriaId]
+    );
+    if (auditoria.rows.length === 0) {
+      return res.status(404).json({ error: "Auditoría no encontrada." });
     }
+
+    const verificacion = verificarAccesoAAuditoria(auditoria.rows[0], req.usuario);
+    if (!verificacion.ok) return res.status(verificacion.status).json({ error: verificacion.error });
+
+    await escalarVencidosPorEntidad(auditoria.rows[0].id_entidad);
 
     const result = await pool.query(
       `SELECT h.*, r.descripcion_brecha, i.descripcion as item_descripcion, i.area as item_area, a.id_responsable,
@@ -96,7 +120,20 @@ async function detalle(req, res) {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Hallazgo no encontrado." });
     }
-    res.json(result.rows[0]);
+
+    const hallazgo = result.rows[0];
+
+    // El Colaborador solo puede ver el detalle si el hallazgo es suyo; Admin/Responsable ya se validan por auditoría.
+    if (req.usuario.rol === "Colaborador" && hallazgo.id_colaborador_asignado !== req.usuario.id) {
+      return res.status(403).json({ error: "Este hallazgo no está asignado a vos." });
+    }
+    if (req.usuario.rol !== "Colaborador") {
+      const auditoriaInfo = await obtenerAuditoriaDeHallazgo(id);
+      const verificacion = verificarAccesoAAuditoria(auditoriaInfo, req.usuario);
+      if (!verificacion.ok) return res.status(verificacion.status).json({ error: verificacion.error });
+    }
+
+    res.json(hallazgo);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error interno del servidor." });
@@ -112,6 +149,18 @@ async function asignarColaborador(req, res) {
   }
 
   try {
+    const auditoriaInfo = await obtenerAuditoriaDeHallazgo(id);
+    const verificacion = verificarAccesoAAuditoria(auditoriaInfo, req.usuario);
+    if (!verificacion.ok) return res.status(verificacion.status).json({ error: verificacion.error });
+
+    const colaborador = await pool.query(`SELECT id_entidad, rol FROM usuario WHERE id_usuario = $1`, [idColaborador]);
+    if (colaborador.rows.length === 0 || colaborador.rows[0].rol !== "Colaborador") {
+      return res.status(400).json({ error: "El colaborador seleccionado no es válido." });
+    }
+    if (colaborador.rows[0].id_entidad !== auditoriaInfo.id_entidad) {
+      return res.status(403).json({ error: "El colaborador debe pertenecer a la misma entidad que la auditoría." });
+    }
+
     await pool.query(
       `UPDATE hallazgo SET id_colaborador_asignado = $2, estado = 'Asignado' WHERE id_hallazgo = $1`,
       [id, idColaborador]
@@ -188,16 +237,19 @@ async function retest(req, res) {
 
   try {
     const actual = await pool.query(
-      `SELECT h.severidad, h.tipo_resolucion_propuesta, r.id_auditoria, a.id_entidad FROM hallazgo h
+      `SELECT h.severidad, h.tipo_resolucion_propuesta, r.id_auditoria, a.id_entidad, a.id_responsable FROM hallazgo h
        JOIN respuesta_checklist r ON r.id_respuesta = h.id_respuesta
        JOIN auditoria a ON a.id_auditoria = r.id_auditoria
        WHERE h.id_hallazgo = $1`,
       [id]
     );
-    const { severidad, tipo_resolucion_propuesta, id_auditoria, id_entidad } = actual.rows[0];
+    if (actual.rows.length === 0) return res.status(404).json({ error: "Hallazgo no encontrado." });
+
+    const { severidad, tipo_resolucion_propuesta, id_auditoria, id_entidad, id_responsable } = actual.rows[0];
+    const verificacion = verificarAccesoAAuditoria({ id_entidad, id_responsable }, req.usuario);
+    if (!verificacion.ok) return res.status(verificacion.status).json({ error: verificacion.error });
 
     if (resultado === "Éxito") {
-      // El estado final depende de qué había propuesto el colaborador (remediación real, riesgo aceptado o falso positivo)
       const estadoFinal = tipo_resolucion_propuesta === "Riesgo Aceptado" || tipo_resolucion_propuesta === "Falso Positivo"
         ? tipo_resolucion_propuesta
         : "Cerrado";
@@ -262,15 +314,19 @@ async function reasignarResponsable(req, res) {
   }
 
   try {
-    const info = await pool.query(
-      `SELECT r.id_auditoria FROM hallazgo h
-       JOIN respuesta_checklist r ON r.id_respuesta = h.id_respuesta
-       WHERE h.id_hallazgo = $1`,
-      [id]
-    );
-    if (info.rows.length === 0) return res.status(404).json({ error: "Hallazgo no encontrado." });
+    const auditoriaInfo = await obtenerAuditoriaDeHallazgo(id);
+    const verificacion = verificarAccesoAAuditoria(auditoriaInfo, req.usuario);
+    if (!verificacion.ok) return res.status(verificacion.status).json({ error: verificacion.error });
 
-    await pool.query(`UPDATE auditoria SET id_responsable = $2 WHERE id_auditoria = $1`, [info.rows[0].id_auditoria, idNuevoResponsable]);
+    const nuevoResp = await pool.query(`SELECT id_entidad, rol FROM usuario WHERE id_usuario = $1`, [idNuevoResponsable]);
+    if (nuevoResp.rows.length === 0 || nuevoResp.rows[0].rol !== "ResponsableCumplimiento") {
+      return res.status(400).json({ error: "El responsable seleccionado no es válido." });
+    }
+    if (nuevoResp.rows[0].id_entidad !== auditoriaInfo.id_entidad) {
+      return res.status(403).json({ error: "El responsable debe pertenecer a la misma entidad que la auditoría." });
+    }
+
+    await pool.query(`UPDATE auditoria SET id_responsable = $2 WHERE id_auditoria = $1`, [auditoriaInfo.id_auditoria, idNuevoResponsable]);
     await pool.query(
       `UPDATE hallazgo SET estado = 'Abierto', nota_administrador = 'Reasignado a un nuevo responsable por el Administrador.' WHERE id_hallazgo = $1`,
       [id]
@@ -292,6 +348,10 @@ async function extenderPlazo(req, res) {
   }
 
   try {
+    const auditoriaInfo = await obtenerAuditoriaDeHallazgo(id);
+    const verificacion = verificarAccesoAAuditoria(auditoriaInfo, req.usuario);
+    if (!verificacion.ok) return res.status(verificacion.status).json({ error: verificacion.error });
+
     const previo = await pool.query(`SELECT id_colaborador_asignado FROM hallazgo WHERE id_hallazgo = $1`, [id]);
     const estadoVuelta = previo.rows[0]?.id_colaborador_asignado ? "Asignado" : "Abierto";
 

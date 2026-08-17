@@ -10,6 +10,9 @@ async function obtenerEstado(req, res) {
     if (auditoria.rows.length === 0) {
       return res.status(404).json({ error: "Auditoría no encontrada." });
     }
+    if (auditoria.rows[0].id_entidad !== req.usuario.idEntidad) {
+      return res.status(403).json({ error: "Esta auditoría no pertenece a tu entidad." });
+    }
     const a = auditoria.rows[0];
     const config = await obtenerConfigInterna(a.id_entidad);
 
@@ -49,6 +52,14 @@ async function descargarPDF(req, res) {
   const { auditoriaId } = req.params;
 
   try {
+    const auditoriaCheck = await pool.query(`SELECT id_entidad FROM auditoria WHERE id_auditoria = $1`, [auditoriaId]);
+    if (auditoriaCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Auditoría no encontrada." });
+    }
+    if (auditoriaCheck.rows[0].id_entidad !== req.usuario.idEntidad) {
+      return res.status(403).json({ error: "Esta auditoría no pertenece a tu entidad." });
+    }
+
     const datos = await pool.query(
       `SELECT c.fecha_emision, c.fecha_vencimiento, c.porcentaje_cumplimiento, c.estado,
               n.nombre as norma_nombre, e.razon_social, e.tipo_entidad

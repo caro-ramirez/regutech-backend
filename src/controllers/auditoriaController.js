@@ -97,14 +97,16 @@ async function obtenerChecklist(req, res) {
     if (auditoria.rows.length === 0) {
       return res.status(404).json({ error: "Auditoría no encontrada." });
     }
+    if (auditoria.rows[0].id_responsable !== req.usuario.id) {
+      return res.status(403).json({ error: "Esta auditoría no está asignada a vos." });
+    }
     const idNorma = auditoria.rows[0].id_norma;
 
     const items = await pool.query(
       `SELECT i.id_item, i.descripcion, i.criticidad, r.resultado, r.evidencia, r.descripcion_brecha
        FROM item_checklist_maestro i
-       JOIN checklist_maestro c ON c.id_checklist = i.id_checklist
        LEFT JOIN respuesta_checklist r ON r.id_item = i.id_item AND r.id_auditoria = $2
-       WHERE c.id_norma = $1
+       WHERE i.id_norma = $1
        ORDER BY i.id_item`,
       [idNorma, id]
     );
@@ -128,7 +130,15 @@ async function enviarChecklist(req, res) {
   try {
     await client.query("BEGIN");
 
-    const auditoriaRow = await client.query(`SELECT id_entidad FROM auditoria WHERE id_auditoria = $1`, [id]);
+    const auditoriaRow = await client.query(`SELECT id_entidad, id_responsable FROM auditoria WHERE id_auditoria = $1`, [id]);
+    if (auditoriaRow.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Auditoría no encontrada." });
+    }
+    if (auditoriaRow.rows[0].id_responsable !== req.usuario.id) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "Esta auditoría no está asignada a vos." });
+    }
     const config = await obtenerConfigInterna(auditoriaRow.rows[0].id_entidad);
     const diasPorCriticidad = {
       Alta: config.sla_alta_dias,
